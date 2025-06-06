@@ -1,14 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"math/rand"
 	"os"
 	"path/filepath"
-	"runtime/pprof"
 	"sync"
 	"time"
 
@@ -30,31 +29,18 @@ import (
 )
 
 func main() {
-	fCPU, err := os.Create("recorder_cpu.prof")
-	if err != nil {
-		log.Fatal("could not create CPU profile: ", err)
-	}
-	defer fCPU.Close() // error handling omitted for example
-	if err := pprof.StartCPUProfile(fCPU); err != nil {
-		log.Fatal("could not start CPU profile: ", err)
-	}
-	defer pprof.StopCPUProfile()
-
 	dir := "table"
 	os.MkdirAll(dir, 0766)
 
 	tmpPath := storage.NewPath(dir)
-	store := filestore.New(tmpPath)
-	state := filestate.New(tmpPath, "_delta_log/_commit.state")
-	lock := filelock.New(tmpPath, "_delta_log/_commit.lock", filelock.Options{})
-	table := delta.NewTable(store, lock, state)
+	// store := filestore.New(tmpPath)
+	// state := filestate.New(tmpPath, "_delta_log/_commit.state")
+	// lock := filelock.New(tmpPath, "_delta_log/_commit.lock", filelock.Options{})
+	// table := delta.NewTable(store, lock, state)
 
 	// First write
-	partitionDir := "/active=true/"
 	fileName := fmt.Sprintf("part-%s.parquet", uuid.New().String())
-	writingPath := filepath.Join(dir, partitionDir, fileName)
-	addRelativePath := filepath.Join(partitionDir, fileName) // Caminho relativo ao storage root
-	os.MkdirAll(filepath.Join(tmpPath.Raw, partitionDir), 0766)
+	filePath := filepath.Join(tmpPath.Raw, fileName)
 
 	// Generate some data
 	arrowSchema := arrow.NewSchema(
@@ -70,34 +56,34 @@ func main() {
 	data := generateRecord(arrowSchema)
 
 	// writing parquet
-	if err := writeParquet(data, writingPath, arrowSchema); err != nil {
-		fmt.Printf("error writing parquets: %v\n", err)
+	if _, err := writeParquet(data, filePath, arrowSchema); err != nil {
+		fmt.Printf("error writing parquets go")
 		return
 	}
 
 	// creating delta schema
-	schema := delta.SchemaTypeStruct{
-		Fields: []delta.SchemaField{
-			{Name: "id", Type: delta.Integer, Nullable: false, Metadata: make(map[string]any)},
-			{Name: "name", Type: delta.String, Nullable: false, Metadata: make(map[string]any)},
-			{Name: "age", Type: delta.Integer, Nullable: false, Metadata: make(map[string]any)},
-			{Name: "salary", Type: delta.Float, Nullable: false, Metadata: make(map[string]any)},
-			{Name: "active", Type: delta.Boolean, Nullable: false, Metadata: make(map[string]any)},
-		},
-	}
+	// schema := delta.SchemaTypeStruct{
+	// 	Fields: []delta.SchemaField{
+	// 		{Name: "id", Type: delta.Integer, Nullable: false, Metadata: make(map[string]any)},
+	// 		{Name: "name", Type: delta.String, Nullable: false, Metadata: make(map[string]any)},
+	// 		{Name: "age", Type: delta.Integer, Nullable: false, Metadata: make(map[string]any)},
+	// 		{Name: "salary", Type: delta.Float, Nullable: false, Metadata: make(map[string]any)},
+	// 		{Name: "active", Type: delta.Boolean, Nullable: false, Metadata: make(map[string]any)},
+	// 	},
+	// }
 
-	add, _, err := delta.NewAdd(store, storage.NewPath(addRelativePath), make(map[string]string))
-	if err != nil {
-		fmt.Printf("error in delta add: %v\n", err)
-		return
-	}
+	// add, _, err := delta.NewAdd(store, storage.NewPath(fileName), make(map[string]string))
+	// if err != nil {
+	// 	fmt.Printf("error in delta add: %v\n", err)
+	// 	return
+	// }
 
-	metadata := delta.NewTableMetaData("Test Table", "test description", new(delta.Format).Default(), schema, []string{"active"}, make(map[string]string))
-	err = table.Create(*metadata, new(delta.Protocol).Default(), delta.CommitInfo{}, []delta.Add{*add})
-	if err != nil {
-		fmt.Printf("error in table create: %v\n", err)
-		return
-	}
+	// metadata := delta.NewTableMetaData("Test Table", "test description", new(delta.Format).Default(), schema, []string{}, make(map[string]string))
+	// err = table.Create(*metadata, new(delta.Protocol).Default(), delta.CommitInfo{}, []delta.Add{*add})
+	// if err != nil {
+	// 	fmt.Printf("error in table create: %v\n", err)
+	// 	return
+	// }
 
 	numThreads := 100
 	wg := new(sync.WaitGroup)
@@ -119,36 +105,38 @@ func main() {
 			transaction := table.CreateTransaction(delta.NewTransactionOptions())
 
 			//Make some data
-			data := generateRecord(arrowSchema)
-			fileName := fmt.Sprintf("part-%s.parquet", uuid.New().String())
-			writingPath := filepath.Join(dir, partitionDir, fileName)
-			addRelativePath := filepath.Join(partitionDir, fileName)
-			os.MkdirAll(filepath.Join(tmpPath.Raw, partitionDir), 0766)
-
-			if err := writeParquet(data, writingPath, arrowSchema); err != nil {
-				fmt.Printf("error writing parquet: %v\n", err)
-			}
+			// data := generateRecord(arrowSchema)
+			// fileName := fmt.Sprintf("part-%s.parquet", uuid.New().String())
+			// filePath := filepath.Join(tmpPath.Raw, fileName)
+			// if _, err := writeParquet(data, filePath, arrowSchema); err != nil {
+			// 	fmt.Printf("error writing parquet: %v\n", err)
+			// }
 			// criando copia pra teste de mais de uma action por transaction
-			fileName1 := "copia-" + fileName
-			writingPath1 := filepath.Join(dir, "/active=false/", fileName1)
-			addRelativePath1 := filepath.Join("/active=false/", fileName1)
-			os.MkdirAll(filepath.Join(tmpPath.Raw, "/active=false/"), 0766)
+			// fileName1 := "copia-" + fileName
+			// filePath1 := filepath.Join(tmpPath.Raw, fileName1)
+			// if _, err := writeParquet(data, filePath1, arrowSchema); err != nil {
+			// 	fmt.Printf("error writing parquet: %v\n", err)
+			// }
 
-			if err := writeParquet(data, writingPath1, arrowSchema); err != nil {
-				fmt.Printf("error writing parquet: %v\n", err)
+			// add, _, err := delta.NewAdd(store, storage.NewPath(fileName), make(map[string]string))
+			// if err != nil {
+			// 	fmt.Printf("error in delta add: %v\n", err)
+			// }
+			// add1, _, err := delta.NewAdd(store, storage.NewPath(fileName1), make(map[string]string))
+			// if err != nil {
+			// 	fmt.Printf("error in delta add: %v\n", err)
+			// }
+			ts := int64(20250606)
+			remove := delta.Remove{
+				Path:                 "part-cf6cbb62-0b18-4e07-9e0f-0798537ad718.parquet",
+				DeletionTimestamp:    &ts,
+				DataChange:           true,
+				ExtendedFileMetadata: false,
 			}
 
-			add, _, err := delta.NewAdd(store, storage.NewPath(addRelativePath), make(map[string]string))
-			if err != nil {
-				fmt.Printf("error in delta add: %v\n", err)
-			}
-			add1, _, err := delta.NewAdd(store, storage.NewPath(addRelativePath1), make(map[string]string))
-			if err != nil {
-				fmt.Printf("error in delta add: %v\n", err)
-			}
-
-			transaction.AddAction(add)
-			transaction.AddAction(add1)
+			// transaction.AddAction(add)
+			// transaction.AddAction(add1)
+			transaction.AddAction(remove)
 			operation := delta.Write{Mode: delta.Append}
 			appMetaData := make(map[string]any)
 			appMetaData["test"] = 123
@@ -172,16 +160,6 @@ func main() {
 		}()
 	}
 	wg.Wait()
-
-	fMEM, err := os.Create("recorder_mem.prof")
-	if err != nil {
-		log.Fatal("could not create memory profile: ", err)
-	}
-	defer fMEM.Close() // error handling omitted for example
-
-	if err := pprof.WriteHeapProfile(fMEM); err != nil {
-		log.Fatal("could not write memory profile: ", err)
-	}
 }
 
 func generateRecord(schema *arrow.Schema) arrow.Record {
@@ -255,39 +233,53 @@ func generateRecord(schema *arrow.Schema) arrow.Record {
 	return record
 }
 
-func writeParquet(data arrow.Record, filename string, schema *arrow.Schema) error {
+type payload struct {
+	File *os.File
+	Size int64
+}
+
+func writeParquet(data arrow.Record, filename string, schema *arrow.Schema) (*payload, error) {
 	file, err := os.Create(filename)
 	if err != nil {
-		fmt.Printf("error creating file with filename: %v\n", err)
-		return err
+		fmt.Println("error creating file with filename: %v", err)
+		return nil, err
 	}
 
 	parquetProps := parquet.NewWriterProperties()
 	arrowProps := pqarrow.NewArrowWriterProperties()
-
-	// Escreve diretamente no arquivo, sem buffer intermediário
-	writer, err := pqarrow.NewFileWriter(schema, file, parquetProps, arrowProps)
+	buf := new(bytes.Buffer)
+	writer, err := pqarrow.NewFileWriter(schema, buf, parquetProps, arrowProps)
 	if err != nil {
 		fmt.Printf("error creating pqarrow file writer: %v\n", err)
-		file.Close()
-		return err
+		return nil, err
 	}
 
 	if err := writer.Write(data); err != nil {
-		fmt.Printf("error writing record to file: %v\n", err)
-		writer.Close()
-		file.Close()
-		return err
+		fmt.Printf("error writing record to buffer: %v\n", err)
+		return nil, err
 	}
 
 	// Close the writer to flush all data and write the footer
 	if err := writer.Close(); err != nil {
 		fmt.Printf("error closing parquet writer: %v\n", err)
-		file.Close()
-		return err
+		return nil, err
 	}
 
-	return nil
+	if _, err := file.Write(buf.Bytes()); err != nil {
+		fmt.Printf("error writing buffer data into file: %v\n", err)
+		return nil, err
+	}
+
+	info, _ := file.Stat()
+	p := &payload{
+		File: file,
+		Size: info.Size(),
+	}
+
+	if err := file.Close(); err != nil {
+		return nil, err
+	}
+	return p, nil
 }
 
 // GCS PACKAGE
@@ -360,3 +352,4 @@ func (g *GCSStore) PutStream(ctx context.Context, path string, reader io.Reader)
 func (g *GCSStore) Close() error {
 	return g.client.Close()
 }
+
