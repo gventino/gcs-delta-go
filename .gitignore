@@ -7,6 +7,10 @@
 *.dll
 *.so
 *.dylib
+application_default_credentials.json
+*.prof
+*.mod
+*.sum
 
 # Test binary, built with `go test -c`
 *.test
