@@ -2,18 +2,15 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io"
 	"log"
+	"main/gcs"
+	gcs_filelock "main/gcs/filelock"
+	gcs_filestate "main/gcs/filestate"
 	"math/rand"
 	"os"
 	"path/filepath"
 	"runtime/pprof"
-	"sync"
-	"time"
-
-	gstorage "cloud.google.com/go/storage"
 
 	"github.com/apache/arrow/go/v14/arrow"
 	"github.com/apache/arrow/go/v14/arrow/array"
@@ -23,10 +20,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rivian/delta-go"
+
 	"github.com/rivian/delta-go/lock/filelock"
-	"github.com/rivian/delta-go/state/filestate"
 	"github.com/rivian/delta-go/storage"
-	"google.golang.org/api/option"
 )
 
 func main() {
@@ -42,21 +38,26 @@ func main() {
 	defer pprof.StopCPUProfile()
 
 	dir := "delta"
-	gcs, err := NewGCSStore(context.Background(), "data", "kanastra-deltago-test", "application_default_credentials.json")
+	gcs, err := gcs.NewGCSStore(context.Background(), "data", "kanastra-deltago-test", "application_default_credentials.json")
 	if err != nil {
 		fmt.Printf("error creating gcs store: %v\n", err)
 		return
 	}
 
 	tmpPath := storage.NewPath(dir)
-	// state := filestate.New(tmpPath, "_delta_log/_commit.state")
-	// lock := filelock.New(tmpPath, "_delta_log/_commit.lock", filelock.Options{})
-	// table := delta.NewTable(gcs, lock, state)
+	baseURI := gcs.BaseURI()
+	state := gcs_filestate.New(baseURI, "_delta_log/_commit.state")
+	state.Store = gcs // always remember to set this guy
+
+	lock := gcs_filelock.New(baseURI, "_delta_log/_commit.lock", filelock.Options{})
+	lock.Store = gcs
+
+	table := delta.NewTable(gcs, lock, state)
 
 	// First write
 	fileName := fmt.Sprintf("part-%s.parquet", uuid.New().String())
 	writingPath := filepath.Join(tmpPath.Raw, fileName)
-	// filePath := filepath.Join("data/", tmpPath.Raw, fileName)
+	filePath := filepath.Join("data/", tmpPath.Raw, fileName)
 
 	// Generate some data
 	arrowSchema := arrow.NewSchema(
@@ -66,6 +67,7 @@ func main() {
 			{Name: "age", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
 			{Name: "salary", Type: arrow.PrimitiveTypes.Float64, Nullable: true},
 			{Name: "active", Type: arrow.FixedWidthTypes.Boolean, Nullable: false},
+			// {Name: "sex", Type: arrow.BinaryTypes.String, Nullable: true},
 		},
 		nil,
 	)
@@ -78,99 +80,104 @@ func main() {
 	}
 
 	// creating delta schema
-	// schema := delta.SchemaTypeStruct{
-	// 	Fields: []delta.SchemaField{
-	// 		{Name: "id", Type: delta.Integer, Nullable: false, Metadata: make(map[string]any)},
-	// 		{Name: "name", Type: delta.String, Nullable: false, Metadata: make(map[string]any)},
-	// 		{Name: "age", Type: delta.Integer, Nullable: false, Metadata: make(map[string]any)},
-	// 		{Name: "salary", Type: delta.Float, Nullable: false, Metadata: make(map[string]any)},
-	// 		{Name: "active", Type: delta.Boolean, Nullable: false, Metadata: make(map[string]any)},
-	// 	},
-	// }
-
-	// add, _, err := delta.NewAdd(gcs, storage.NewPath(filePath), make(map[string]string))
-	// if err != nil {
-	// 	fmt.Printf("error in delta add: %v\n", err)
-	// 	return
-	// }
-
-	// metadata := delta.NewTableMetaData("Test Table", "test description", new(delta.Format).Default(), schema, []string{}, make(map[string]string))
-	// err = table.Create(*metadata, new(delta.Protocol).Default(), delta.CommitInfo{}, []delta.Add{*add})
-	// if err != nil {
-	// 	fmt.Printf("error in table create: %v\n", err)
-	// 	return
-	// }
-
-	numThreads := 100
-	wg := new(sync.WaitGroup)
-	for i := 0; i < numThreads; i++ {
-		wg.Add(1)
-
-		go func() {
-			defer wg.Done()
-
-			wait := rand.Int63n(int64(10 * time.Millisecond))
-			time.Sleep(time.Duration(wait))
-
-			// store := filestore.New(tmpPath)
-			state := filestate.New(storage.NewPath(dir), "_delta_log/_commit.state")
-			lock := filelock.New(tmpPath, "_delta_log/_commit.lock", filelock.Options{})
-
-			//Lock needs to be instantiated for each worker because it is passed by reference, so if it is not created different instances of tables would share the same lock
-			table := delta.NewTable(gcs, lock, state)
-			transaction := table.CreateTransaction(delta.NewTransactionOptions())
-
-			//Make some data
-			data := generateRecord(arrowSchema)
-			fileName := fmt.Sprintf("part-%s.parquet", uuid.New().String())
-			filePath := filepath.Join("data/", tmpPath.Raw, fileName)
-			writingPath := filepath.Join(tmpPath.Raw, fileName)
-			if err := writeParquetToGCS(data, gcs, writingPath, arrowSchema); err != nil {
-				fmt.Printf("error writing parquet: %v\n", err)
-			}
-			// criando copia pra teste de mais de uma action por transaction
-			fileName1 := "copia-" + fileName
-			filePath1 := filepath.Join("data/", tmpPath.Raw, fileName1)
-			writingPath1 := filepath.Join(tmpPath.Raw, fileName1)
-			if err := writeParquetToGCS(data, gcs, writingPath1, arrowSchema); err != nil {
-				fmt.Printf("error writing parquet: %v\n", err)
-			}
-
-			add, _, err := delta.NewAdd(gcs, storage.NewPath(filePath), make(map[string]string))
-			if err != nil {
-				fmt.Printf("error in delta add: %v\n", err)
-			}
-			add1, _, err := delta.NewAdd(gcs, storage.NewPath(filePath1), make(map[string]string))
-			if err != nil {
-				fmt.Printf("error in delta add: %v\n", err)
-			}
-
-			transaction.AddAction(add)
-			transaction.AddAction(add1)
-			operation := delta.Write{Mode: delta.Append}
-			appMetaData := make(map[string]any)
-			appMetaData["test"] = 123
-
-			transaction.SetOperation(operation)
-			transaction.SetAppMetadata(appMetaData)
-			v, err := transaction.Commit()
-			if err != nil {
-				fmt.Printf("error commiting transaction: %v", err)
-			}
-
-			if rand.Intn(20) == 0 {
-				// We don't actually need a lock here since we are only writing a checkpoint for a version that this process has committed
-				checkpointLock := filelock.New(tmpPath, "_delta_log/_checkpoint.lock", filelock.Options{})
-				checkpointed, err := table.CreateCheckpoint(checkpointLock, delta.NewCheckpointConfiguration(), v)
-				if err != nil {
-					fmt.Printf("error creating checkpoint: %v", err)
-				}
-				fmt.Printf("checkpoint created for version %d: %v", v, checkpointed)
-			}
-			wg.Done()
-		}()
+	schema := delta.SchemaTypeStruct{
+		Fields: []delta.SchemaField{
+			{Name: "id", Type: delta.Integer, Nullable: false, Metadata: make(map[string]any)},
+			{Name: "name", Type: delta.String, Nullable: false, Metadata: make(map[string]any)},
+			{Name: "age", Type: delta.Integer, Nullable: false, Metadata: make(map[string]any)},
+			{Name: "salary", Type: delta.Float, Nullable: false, Metadata: make(map[string]any)},
+			{Name: "active", Type: delta.Boolean, Nullable: false, Metadata: make(map[string]any)},
+			// {Name: "sex", Type: delta.String, Nullable: true, Metadata: make(map[string]any)},
+		},
 	}
-	wg.Wait()
+
+	add, _, err := delta.NewAdd(gcs, storage.NewPath(filePath), make(map[string]string))
+	if err != nil {
+		fmt.Printf("error in delta add: %v\n", err)
+		return
+	}
+
+	metadata := delta.NewTableMetaData("Test Table", "test description", new(delta.Format).Default(), schema, []string{}, make(map[string]string))
+	err = table.Create(*metadata, new(delta.Protocol).Default(), delta.CommitInfo{}, []delta.Add{*add})
+	if err != nil {
+		fmt.Printf("error in table create: %v\n", err)
+		return
+	}
+
+	// numThreads := 2
+	// wg := new(sync.WaitGroup)
+	// for i := 0; i < numThreads; i++ {
+	// wg.Add(1)
+
+	// go func() {
+	// 	defer wg.Done()
+
+	// store := filestore.New(tmpPath)
+	baseURI = gcs.BaseURI()
+	state = gcs_filestate.New(baseURI, "_delta_log/_commit.state")
+	state.Store = gcs // always remember to set this guy
+
+	lock = gcs_filelock.New(baseURI, "_delta_log/_commit.lock", filelock.Options{})
+	lock.Store = gcs
+
+	//Lock needs to be instantiated for each worker because it is passed by reference, so if it is not created different instances of tables would share the same lock
+	table, err = delta.OpenTable(gcs, lock, state)
+	if err != nil {
+		fmt.Printf("error opening table: %v\n", err)
+		return
+	}
+	table.State.CurrentMetadata.Schema = schema
+	transaction := table.CreateTransaction(delta.NewTransactionOptions())
+
+	//Make some data
+	data = generateRecord(arrowSchema)
+	fileName = fmt.Sprintf("teste-%s.parquet", uuid.New().String())
+	filePath = filepath.Join("data/", tmpPath.Raw, fileName)
+	writingPath = filepath.Join(tmpPath.Raw, fileName)
+	if err := writeParquetToGCS(data, gcs, writingPath, arrowSchema); err != nil {
+		fmt.Printf("error writing parquet: %v\n", err)
+	}
+
+	// criando copia pra teste de mais de uma action por transaction
+	fileName1 := "copia-" + fileName
+	filePath1 := filepath.Join("data/", tmpPath.Raw, fileName1)
+	writingPath1 := filepath.Join(tmpPath.Raw, fileName1)
+	if err := writeParquetToGCS(data, gcs, writingPath1, arrowSchema); err != nil {
+		fmt.Printf("error writing parquet: %v\n", err)
+	}
+
+	add, _, err = delta.NewAdd(gcs, storage.NewPath(filePath), make(map[string]string))
+	if err != nil {
+		fmt.Printf("error in delta add: %v\n", err)
+	}
+	add1, _, err := delta.NewAdd(gcs, storage.NewPath(filePath1), make(map[string]string))
+	if err != nil {
+		fmt.Printf("error in delta add: %v\n", err)
+	}
+
+	transaction.AddAction(add)
+	transaction.AddAction(add1)
+	operation := delta.Write{Mode: delta.Append}
+	appMetaData := make(map[string]any)
+	appMetaData["test"] = 123
+
+	transaction.SetOperation(operation)
+	transaction.SetAppMetadata(appMetaData)
+	v, err := transaction.Commit()
+	if err != nil {
+		fmt.Printf("error commiting transaction: %v", err)
+	}
+
+	if true {
+		// We don't actually need a lock here since we are only writing a checkpoint for a version that this process has committed
+		checkpointLock := gcs_filelock.New(baseURI, "_delta_log/_commit.lock", filelock.Options{})
+		checkpointLock.Store = gcs
+		checkpointed, err := table.CreateCheckpoint(checkpointLock, delta.NewCheckpointConfiguration(), v)
+		if err != nil {
+			fmt.Printf("error creating checkpoint: %v", err)
+		}
+		fmt.Printf("checkpoint created for version %d: %v", v, checkpointed)
+	}
 
 	fMEM, err := os.Create("recorder_mem.prof")
 	if err != nil {
@@ -254,43 +261,8 @@ func generateRecord(schema *arrow.Schema) arrow.Record {
 	return record
 }
 
-// func writeParquet(data arrow.Record, filename string, schema *arrow.Schema) error {
-// 	file, err := os.Create(filename)
-// 	if err != nil {
-// 		fmt.Printf("error creating file with filename: %v\n", err)
-// 		return err
-// 	}
-
-// 	parquetProps := parquet.NewWriterProperties()
-// 	arrowProps := pqarrow.NewArrowWriterProperties()
-
-// 	// Escreve diretamente no arquivo, sem buffer intermediário
-// 	writer, err := pqarrow.NewFileWriter(schema, file, parquetProps, arrowProps)
-// 	if err != nil {
-// 		fmt.Printf("error creating pqarrow file writer: %v\n", err)
-// 		file.Close()
-// 		return err
-// 	}
-
-// 	if err := writer.Write(data); err != nil {
-// 		fmt.Printf("error writing record to file: %v\n", err)
-// 		writer.Close()
-// 		file.Close()
-// 		return err
-// 	}
-
-// 	// Close the writer to flush all data and write the footer
-// 	if err := writer.Close(); err != nil {
-// 		fmt.Printf("error closing parquet writer: %v\n", err)
-// 		file.Close()
-// 		return err
-// 	}
-
-// 	return nil
-// }
-
 // writeParquetToGCS escreve um arquivo parquet diretamente no GCS
-func writeParquetToGCS(data arrow.Record, gcs *GCSStore, path string, schema *arrow.Schema) error {
+func writeParquetToGCS(data arrow.Record, gcs *gcs.GCSStore, path string, schema *arrow.Schema) error {
 	ctx := context.Background()
 	writer := gcs.GetWriter(ctx, path)
 
@@ -312,160 +284,4 @@ func writeParquetToGCS(data arrow.Record, gcs *GCSStore, path string, schema *ar
 	}
 
 	return nil
-}
-
-// GCS PACKAGE
-type GCSStore struct {
-	client     *gstorage.Client
-	bucketName string
-	prefix     string
-}
-
-func NewGCSStore(ctx context.Context, prefix string, bucketName string, credentialsPath ...string) (*GCSStore, error) {
-	var client *gstorage.Client
-	var err error
-
-	if len(credentialsPath) > 0 && credentialsPath[0] != "" {
-		client, err = gstorage.NewClient(ctx, option.WithCredentialsFile(credentialsPath[0]))
-	} else {
-		client, err = gstorage.NewClient(ctx)
-	}
-
-	if err != nil {
-		fmt.Errorf("Failed to create GCS client: %v", err)
-		return nil, err
-	}
-	return &GCSStore{
-		client:     client,
-		bucketName: bucketName,
-		prefix:     prefix,
-	}, nil
-}
-
-func (gcsStore *GCSStore) Put(location storage.Path, bytes []byte) error {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*50)
-	defer cancel()
-
-	obj := gcsStore.client.Bucket(gcsStore.bucketName).Object(gcsStore.prefix + "/" + location.Raw)
-	w := obj.NewWriter(ctx)
-
-	_, err := w.Write(bytes)
-	if err != nil {
-		fmt.Errorf("Failed to write on GCS: %v", err)
-		return err
-	}
-	return w.Close()
-}
-
-func (g *GCSStore) GetWriter(ctx context.Context, path string) io.Writer {
-	obj := g.client.Bucket(g.bucketName).Object(g.prefix + "/" + path)
-	return obj.NewWriter(ctx)
-}
-
-// TODO:
-func (gcsStore *GCSStore) Get(location storage.Path) ([]byte, error) {
-	return []byte("De sorte que haja em vós o mesmo sentimento que houve também em Cristo Jesus."), nil
-}
-func (gcsStore *GCSStore) Head(location storage.Path) (storage.ObjectMeta, error) {
-	var m storage.ObjectMeta
-	ctx := context.Background()
-	obj := gcsStore.client.Bucket(gcsStore.bucketName).Object(location.Raw)
-	attrs, err := obj.Attrs(ctx)
-	if err != nil {
-		if err == gstorage.ErrObjectNotExist {
-			return m, fmt.Errorf("head object does not exist: %w", err)
-		}
-		return m, fmt.Errorf("failed to get object attrs: %w", err)
-	}
-	m.Location = location
-	m.LastModified = attrs.Updated
-	m.Size = attrs.Size
-	return m, nil
-}
-
-func (g *GCSStore) Delete(location storage.Path) error {
-	return nil
-}
-
-func (g *GCSStore) DeleteFolder(location storage.Path) error {
-	return nil
-}
-
-func (g *GCSStore) List(prefix storage.Path, previousResult *storage.ListResult) (storage.ListResult, error) {
-	return storage.ListResult{}, nil
-}
-
-func (g *GCSStore) ListAll(prefix storage.Path) (storage.ListResult, error) {
-	return storage.ListResult{}, nil
-}
-
-func (g *GCSStore) IsListOrdered() bool {
-	return false
-}
-
-func (g *GCSStore) Rename(from storage.Path, to storage.Path) error {
-	return nil
-}
-
-func (g *GCSStore) RenameIfNotExists(from storage.Path, to storage.Path) error {
-	return nil
-}
-
-func (g *GCSStore) ReadAt(location storage.Path, p []byte, off int64, max int64) (n int, err error) {
-	ctx := context.Background()
-
-	obj := g.client.Bucket(g.bucketName).Object(location.Raw)
-
-	length := max - off + 1
-	if length < 0 {
-		return 0, fmt.Errorf("invalid range: max < off")
-	}
-
-	reader, err := obj.NewRangeReader(ctx, off, length)
-	if err != nil {
-		if errors.Is(err, gstorage.ErrObjectNotExist) {
-			return 0, fmt.Errorf("object does not exist: %w", err)
-		}
-		return 0, fmt.Errorf("failed to create range reader: %w", err)
-	}
-	defer reader.Close()
-
-	return io.ReadFull(reader, p)
-}
-
-func (g *GCSStore) SupportsWriter() bool {
-	return true
-}
-
-func (g *GCSStore) Writer(to storage.Path, flag int) (io.Writer, func() error, error) {
-	return nil, func() error { return nil }, nil
-}
-
-func (gcsStore *GCSStore) BaseURI() storage.Path {
-	return storage.Path{
-		Raw: gcsStore.prefix + gcsStore.bucketName,
-	}
-}
-
-// PutStream uploads a stream of data to GCS at the specified path.
-func (g *GCSStore) PutStream(ctx context.Context, path string, reader io.Reader) error {
-	obj := g.client.Bucket(g.bucketName).Object(g.prefix + "/" + path)
-	writer := obj.NewWriter(ctx)
-
-	writer.ContentType = "application/octet-stream"
-
-	if _, err := io.Copy(writer, reader); err != nil {
-		writer.Close()
-		return fmt.Errorf("failed to write to GCS: %w", err)
-	}
-
-	if err := writer.Close(); err != nil {
-		return fmt.Errorf("failed to close GCS writer: %w", err)
-	}
-
-	return nil
-}
-
-func (g *GCSStore) Close() error {
-	return g.client.Close()
 }

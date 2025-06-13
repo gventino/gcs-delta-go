@@ -11,6 +11,7 @@ application_default_credentials.json
 *.prof
 *.mod
 *.sum
+.vscode
 
 # Test binary, built with `go test -c`
 *.test
